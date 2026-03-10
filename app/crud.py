@@ -1,8 +1,8 @@
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
 from datetime import datetime, timezone
-from .models import URLMap
-from .utils import generate_short_code
+from .models import URLMap, ClickEvent
+from .utils import encode_base62
 
 
 def create_short_url(db: Session, original_url: str, custom_alias: str = None, expires_at=None):
@@ -21,19 +21,28 @@ def create_short_url(db: Session, original_url: str, custom_alias: str = None, e
         if existing_alias:
             return None
 
-        short_code = custom_alias
-    else:
-        short_code = generate_short_code()
-        while db.query(URLMap).filter(URLMap.short_code == short_code).first():
-            short_code = generate_short_code()
+        db_url = URLMap(
+            original_url=str(original_url),
+            short_code=custom_alias,
+            expires_at=expires_at
+        )
+        db.add(db_url)
+        db.commit()
+        db.refresh(db_url)
+        return db_url
 
+    # Step 1: create row with temporary placeholder
     db_url = URLMap(
         original_url=str(original_url),
-        short_code=short_code,
+        short_code="temp",
         expires_at=expires_at
     )
-
     db.add(db_url)
+    db.commit()
+    db.refresh(db_url)
+
+    # Step 2: generate Base62 short code from DB id
+    db_url.short_code = encode_base62(db_url.id)
     db.commit()
     db.refresh(db_url)
 
@@ -70,3 +79,27 @@ def increment_click_count(db: Session, url_obj: URLMap):
     db.commit()
     db.refresh(url_obj)
     return url_obj
+
+
+def log_click_event(db: Session, url_obj: URLMap, ip_address=None, user_agent=None, referrer=None):
+    click_event = ClickEvent(
+        url_id=url_obj.id,
+        short_code=url_obj.short_code,
+        ip_address=ip_address,
+        user_agent=user_agent,
+        referrer=referrer
+    )
+    db.add(click_event)
+    db.commit()
+    db.refresh(click_event)
+    return click_event
+
+
+def get_recent_click_events(db: Session, short_code: str, limit: int = 10):
+    return (
+        db.query(ClickEvent)
+        .filter(ClickEvent.short_code == short_code)
+        .order_by(ClickEvent.clicked_at.desc())
+        .limit(limit)
+        .all()
+    )

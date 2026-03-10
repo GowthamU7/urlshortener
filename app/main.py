@@ -1,8 +1,10 @@
-from fastapi import FastAPI, Depends, HTTPException
+import time
+import os
+from fastapi import FastAPI, Depends, HTTPException, Request, BackgroundTasks
 from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
+from sqlalchemy.exc import OperationalError
 from dotenv import load_dotenv
-import os
 
 from .database import Base, engine, get_db
 from .redis_client import redis_client
@@ -12,9 +14,35 @@ load_dotenv()
 
 BASE_URL = os.getenv("BASE_URL", "http://127.0.0.1:8000")
 
-Base.metadata.create_all(bind=engine)
+for attempt in range(10):
+    try:
+        Base.metadata.create_all(bind=engine)
+        break
+    except OperationalError:
+        print(f"Database not ready, retrying... ({attempt + 1}/10)")
+        time.sleep(3)
+else:
+    raise Exception("Could not connect to the database after multiple attempts")
 
 app = FastAPI(title="Scalable URL Shortener API")
+
+
+def log_click_event_background(short_code: str, ip_address=None, user_agent=None, referrer=None):
+    db_generator = get_db()
+    db = next(db_generator)
+
+    try:
+        db_url = crud.get_url_by_code(db, short_code)
+        if db_url:
+            crud.log_click_event(
+                db=db,
+                url_obj=db_url,
+                ip_address=ip_address,
+                user_agent=user_agent,
+                referrer=referrer
+            )
+    finally:
+        db.close()
 
 
 @app.get("/")
@@ -23,7 +51,11 @@ def root():
 
 
 @app.post("/shorten", response_model=schemas.URLResponse)
-def shorten_url(payload: schemas.URLCreate, db: Session = Depends(get_db)):
+def shorten_url(payload: schemas.URLCreate, request: Request, db: Session = Depends(get_db)):
+    client_ip = request.client.host if request.client else "unknown"
+    rate_limit_key = f"rate_limit:shorten:{client_ip}"
+    utils.check_rate_limit(redis_client, rate_limit_key, limit=5, window_seconds=60)
+
     if payload.custom_alias and not utils.is_valid_alias(payload.custom_alias):
         raise HTTPException(
             status_code=400,
@@ -58,21 +90,56 @@ def get_url_info(short_code: str, db: Session = Depends(get_db)):
     return db_url
 
 
-@app.get("/{short_code}")
-def redirect_to_original(short_code: str, db: Session = Depends(get_db)):
-    cached_url = redis_client.get(short_code)
-    if cached_url:
-        db_url = crud.get_url_by_code(db, short_code)
-        if db_url:
-            crud.increment_click_count(db, db_url)
-        return RedirectResponse(url=cached_url)
-
+@app.get("/analytics/{short_code}", response_model=schemas.URLAnalyticsResponse)
+def get_url_analytics(short_code: str, db: Session = Depends(get_db)):
     db_url = crud.get_url_by_code(db, short_code)
 
     if not db_url:
         raise HTTPException(status_code=404, detail="Short URL not found or expired")
 
-    redis_client.setex(short_code, 3600, db_url.original_url)
+    events = crud.get_recent_click_events(db, short_code)
+
+    return {
+        "short_code": db_url.short_code,
+        "original_url": db_url.original_url,
+        "total_clicks": db_url.click_count,
+        "recent_events": events
+    }
+
+
+@app.get("/{short_code}")
+def redirect_to_original(
+    short_code: str,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db)
+):
+    client_ip = request.client.host if request.client else "unknown"
+    rate_limit_key = f"rate_limit:redirect:{client_ip}"
+    utils.check_rate_limit(redis_client, rate_limit_key, limit=20, window_seconds=60)
+
+    cached_url = redis_client.get(short_code)
+
+    db_url = crud.get_url_by_code(db, short_code)
+    if not db_url:
+        raise HTTPException(status_code=404, detail="Short URL not found or expired")
+
+    ip_address = client_ip
+    user_agent = request.headers.get("user-agent")
+    referrer = request.headers.get("referer")
 
     crud.increment_click_count(db, db_url)
+
+    background_tasks.add_task(
+        log_click_event_background,
+        short_code,
+        ip_address,
+        user_agent,
+        referrer
+    )
+
+    if cached_url:
+        return RedirectResponse(url=cached_url)
+
+    redis_client.setex(short_code, 3600, db_url.original_url)
     return RedirectResponse(url=db_url.original_url)
