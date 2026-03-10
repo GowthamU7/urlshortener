@@ -10,5 +10,6 @@ class URLMap(Base):
     original_url = Column(String, nullable=False)
     short_code = Column(String, unique=True, index=True, nullable=False)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
+    expires_at = Column(DateTime(timezone=True), nullable=True)
     click_count = Column(Integer, default=0)
     is_active = Column(Boolean, default=True)
