@@ -30,8 +30,7 @@ app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:5173",
-        "https://urlshortener-7axa.onrender.com/",
-        "https://urlshortener-fe-imyv.vercel.app/"
+        "https://urlshortener-fe-imyv.vercel.app"
     ],
     allow_credentials=True,
     allow_methods=["*"],
