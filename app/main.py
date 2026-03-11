@@ -5,6 +5,7 @@ from fastapi.responses import RedirectResponse
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import OperationalError
 from dotenv import load_dotenv
+from fastapi.middleware.cors import CORSMiddleware
 
 from .database import Base, engine, get_db
 from .redis_client import redis_client
@@ -25,7 +26,16 @@ else:
     raise Exception("Could not connect to the database after multiple attempts")
 
 app = FastAPI(title="Scalable URL Shortener API")
-
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=[
+        "http://localhost:5173",
+        "https://urlshortener-7axa.onrender.com/"
+    ],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 def log_click_event_background(short_code: str, ip_address=None, user_agent=None, referrer=None):
     db_generator = get_db()
